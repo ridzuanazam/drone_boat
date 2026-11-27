@@ -2,6 +2,11 @@
 """EV3 motor TCP server for the Drone Boat (Port A=Right, Port B=Left, silent)."""
 
 try:
+    import uos as os
+except ImportError:
+    import os
+
+try:
     import usocket as socket
 except ImportError:
     import socket
@@ -74,6 +79,29 @@ def _is_valid_ipv4(text):
         if val < 0 or val > 255:
             return False
     return True
+
+
+def _ensure_ev3_usb_ipv4():
+    """Ensure EV3 usb0 has a link-local IPv4 address (169.254.201.2) when plugged into Pi."""
+    ips = get_local_ips()
+    if any(ip.startswith("169.254.") for ip in ips):
+        return
+    for cmd in (
+        "ip link set usb0 up 2>/dev/null",
+        "ip addr add 169.254.201.2/16 broadcast 169.254.255.255 dev usb0 2>/dev/null",
+        "sudo -n ip link set usb0 up 2>/dev/null",
+        "sudo -n ip addr add 169.254.201.2/16 broadcast 169.254.255.255 dev usb0 2>/dev/null",
+        "echo maker | sudo -S ip link set usb0 up 2>/dev/null",
+        "echo maker | sudo -S ip addr add 169.254.201.2/16 broadcast 169.254.255.255 dev usb0 2>/dev/null",
+    ):
+        try:
+            if hasattr(os, "system"):
+                os.system(cmd)
+        except Exception:
+            pass
+        ips = get_local_ips()
+        if any(ip.startswith("169.254.") for ip in ips):
+            return
 
 
 def get_local_ips(fib_trie_path="/proc/net/fib_trie"):
@@ -349,6 +377,7 @@ def run_server(
 ):
     """Initialize EV3 motors (Port A=Right, Port B=Left) and run silent TCP server."""
     ev3 = EV3Brick()
+    _ensure_ev3_usb_ipv4()
     motors = MotorController(direction=MOTOR_DIRECTION)
     missing_ports = motors.missing_ports()
     motors.stop()
@@ -365,15 +394,18 @@ def run_server(
         try:
             server6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
             server6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, "IPPROTO_IPV6") and hasattr(socket, "IPV6_V6ONLY"):
-                try:
-                    server6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-                except OSError:
-                    pass
-            addr6 = socket.getaddrinfo("::", actual_port, socket.AF_INET6, socket.SOCK_STREAM)[0][-1]
+            try:
+                server6.setsockopt(41, 26, 1)  # IPPROTO_IPV6=41, IPV6_V6ONLY=26 on Linux
+            except Exception:
+                pass
+            try:
+                addr6 = socket.getaddrinfo("::", actual_port, socket.AF_INET6)[0][-1]
+            except Exception:
+                addr6 = socket.getaddrinfo("::", actual_port)[0][-1]
             server6.bind(addr6)
             server6.listen(1)
-        except Exception:
+        except Exception as exc:
+            print("IPv6 bind note:", exc)
             if server6 is not None:
                 try:
                     server6.close()

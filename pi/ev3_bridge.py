@@ -437,7 +437,7 @@ class EV3Bridge:
     def _connect_once(self):
         _ensure_linux_usb_network()
         candidate_hosts = [self.host]
-        for extra in ("ev3dev.local", "ev3dev"):
+        for extra in ("169.254.201.2", "ev3dev.local", "ev3dev"):
             if extra not in candidate_hosts:
                 candidate_hosts.append(extra)
         for neighbor_ip in _get_arp_neighbor_ips():
