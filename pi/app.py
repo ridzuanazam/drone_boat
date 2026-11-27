@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import socket
+import sys
 from urllib.parse import parse_qs, unquote, urlsplit
 import zipfile
 
@@ -78,11 +79,24 @@ class BoatHTTPServer(ThreadingHTTPServer):
         self.static_dir = static_dir
         super().__init__(server_address, handler_cls)
 
+    def handle_error(self, request, client_address):
+        """Silence harmless iOS Safari keep-alive ConnectionResetError / BrokenPipeError."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError, OSError)):
+            return
+        super().handle_error(request, client_address)
+
 
 class BoatRequestHandler(BaseHTTPRequestHandler):
     """Serves the mobile-first FPV cockpit UI, MJPEG stream, and control API."""
 
     protocol_version = "HTTP/1.1"
+
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError, OSError):
+            pass
 
     def log_message(self, format, *args):
         # Suppress rapid polling/drive log noise; keep non-2xx/3xx errors visible.
@@ -448,7 +462,18 @@ def _best_local_ip():
         s.close()
         return ip
     except OSError:
-        return "localhost"
+        pass
+    try:
+        from ev3_bridge import _get_local_ipv4s
+        ips = _get_local_ipv4s()
+        for ip in ips:
+            if ip.startswith("10.42."):
+                return ip
+        if ips:
+            return ips[0]
+    except Exception:
+        pass
+    return "localhost"
 
 
 def main():
