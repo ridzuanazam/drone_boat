@@ -91,13 +91,15 @@ drone_boat/
 5. Unplug the USB cable from your laptop and **plug the EV3 into the Raspberry Pi 5 USB-A port**.
 6. On the EV3 Brick screen:
    - Open **File Browser** → navigate into **`drone_boat/ev3`** (or **`ev3_project`**) → select **`main.py`** → press the **Center button**.
+   - On startup, `main.py` automatically configures the EV3's `usb0` interface with link-local IPv4 **`169.254.201.2/16`** (and listens on both IPv4 `0.0.0.0:5555` and IPv6 `[::]:5555`).
    - The EV3 will **beep once** and display:
      ```text
      Boat EV3 Ready
-     169.254.x.x
+     169.254.201.2
      Port: 5555
      ```
-   - *(If a motor is not plugged into Port A or B yet, it will also display `No Motor: A,B` and automatically activate the motor as soon as you plug it in.)*
+   - *(If a motor is not plugged into Port A or B yet, it will also display `No Motor: A,B` and automatically hot-plug the motor as soon as you connect it.)*
+   - > **Important:** Running `git pull` on the Raspberry Pi only updates the Raspberry Pi's files. Whenever `ev3/main.py` is updated, make sure you also re-upload `ev3/main.py` onto the EV3 Brick using VS Code (**`F5`** in `EV3DEV DEVICE BROWSER`).
 
 ---
 
@@ -150,14 +152,21 @@ When testing outdoors or anywhere without a local router, turn the Raspberry Pi 
 
 ### Phase 5: Start the Raspberry Pi Server & Connect iPhone 14
 
-1. Confirm the EV3 is plugged into the Raspberry Pi 5 via USB and showing **`Boat EV3 Ready / Port: 5555`**.
-2. On the Raspberry Pi 5 terminal, start the server using **system Python** (`/usr/bin/python3`):
+1. Confirm the EV3 is plugged into the Raspberry Pi 5 via USB and showing **`Boat EV3 Ready / 169.254.201.2 / Port: 5555`**.
+2. On the Raspberry Pi 5 terminal, stop any previous server instance and start the server using **system Python** (`/usr/bin/python3`):
    ```bash
    cd ~/drone_boat/pi
+   pkill -f "python3 app.py" 2>/dev/null || true
    /usr/bin/python3 app.py
    ```
    > **Important:** Always use `/usr/bin/python3 app.py` (do **not** use an isolated `venv`, because `python3-picamera2` and `imx500` are installed in `/usr/lib/python3/dist-packages`).
-3. Within 1–2 seconds, check the EV3 screen—it will say **`Pi Connected`**.
+3. Within 1–2 seconds:
+   - The Raspberry Pi terminal prints:
+     ```text
+     Drone Boat Cockpit listening on http://10.42.0.1:5000
+     Connected to EV3 at 169.254.201.2:5555
+     ```
+   - The EV3 screen prints **`Pi Connected`**.
 4. On your **iPhone 14**:
    - Open **Settings → Wi-Fi** and connect to **`DroneBoat`** (password: `droneboat`).
    - If iOS displays *"Wi-Fi Network 'DroneBoat' Does Not Appear to Be Connected to the Internet"*, tap **Keep Trying Wi-Fi** (or **Use Without Internet**).
@@ -200,10 +209,10 @@ Both the iPhone touch joystick and keyboard `W`/`A`/`S`/`D` keys produce normali
 2. **`EV3Bridge.set_motors(left, right)`** sends `M <left> <right>\n` (or `S\n` when `(0, 0)`) over a low-latency `TCP_NODELAY` socket to the EV3.
 3. **`MotorController` in `ev3/main.py`** maps **`Port.B`** to `left_motor` and **`Port.A`** to `right_motor`, hot-reconnecting any motor port if a cable was plugged in after startup.
 
-### 4.2 Automatic USB Link Discovery (IPv4 + IPv6 + ARP + UDP)
-Plugging the EV3 into a Raspberry Pi 5 USB-A port creates a wired USB-Ethernet network interface (`169.254.x.x` link-local IPv4 and `fe80::...` link-local IPv6).
-- `ev3/main.py` binds both IPv4 (`0.0.0.0:5555`) and IPv6 (`[::]:5555`) TCP sockets plus UDP discovery port `5556`.
-- `pi/ev3_bridge.py` automatically checks `ev3dev.local` (IPv4 & IPv6), scans `/proc/net/arp` and `/proc/net/fib_trie` for `169.254.x.x` USB neighbors, and broadcasts `EV3_BOAT_DISCOVER` on UDP port `5556` across all interfaces so the Pi finds the EV3 even when `wlan0` is acting as a Wi-Fi Hotspot (`10.42.0.1`).
+### 4.2 Automatic USB Link Discovery (IPv4 + IPv6 + EUI-64 + ARP + UDP)
+Plugging the EV3 into a Raspberry Pi 5 USB-A port creates a wired USB-Ethernet network interface (`usb0`, using `169.254.x.x/16` link-local IPv4 and `fe80::...` link-local IPv6).
+- On the EV3 side, `_ensure_ev3_usb_ipv4()` in `ev3/main.py` automatically brings up `usb0` with `169.254.201.2/16` if no IPv4 address is assigned yet, and binds both IPv4 (`0.0.0.0:5555`) and IPv6 (`[::]:5555`) TCP sockets plus UDP discovery port `5556`.
+- On the Raspberry Pi side, `pi/ev3_bridge.py` automatically brings up the Pi's `usb0` interface (`_ensure_linux_usb_network()`), connects directly to `169.254.201.2:5555` or `ev3dev.local`, derives the EV3's link-local IPv6 EUI-64 address (`fe80::16:53ff:feXX:YYZZ%usb0`) from the `usb0` gadget MAC address, scans `/proc/net/arp` and `ip -6 neigh`, and broadcasts `EV3_BOAT_DISCOVER` on UDP port `5556`. This guarantees zero-config connection even when `wlan0` is acting as a Wi-Fi Hotspot (`10.42.0.1`).
 
 ### 4.3 Three-Layer Runaway Safety Failsafe
 1. **iPhone/Browser Layer (`controller.js`)**: Immediately sends `POST /api/stop` when you release the joystick, switch tabs, lock your iPhone, or open the gallery. Sends `POST /api/heartbeat` every `400 ms` while driving.
@@ -276,11 +285,21 @@ journalctl -u drone-boat -f
 
 ## 7. Troubleshooting
 
-- **Top-left status shows `NO EV3` (red dot):**
-  - Make sure `ev3/main.py` is running on the EV3 (`Boat EV3 Ready` and `Port: 5555` visible on the EV3 screen) and the USB cable connects the EV3 to the Pi 5.
-  - If needed, read the IP address displayed on the EV3 LCD and pass it explicitly:
+- **`Device or resource busy` (IMX500) or `OSError: [Errno 98] Address already in use` when starting `app.py`:**
+  - Another instance of `python3 app.py` (or the `drone-boat` systemd service) is already running in the background and holding the camera and port `5000`.
+  - Stop the existing instance first:
     ```bash
-    EV3_HOST=169.254.x.x /usr/bin/python3 app.py
+    pkill -f "python3 app.py" ; sleep 1
+    /usr/bin/python3 app.py
+    ```
+    *(Or if using systemd: `sudo systemctl stop drone-boat`.)*
+- **Top-left status shows `NO EV3` (red dot):**
+  - Check the EV3 LCD screen: it must show **`Boat EV3 Ready`**, **`169.254.201.2`** (or another IP), and **`Port: 5555`**.
+  - If the EV3 LCD only shows `Boat EV3 Ready` and `Port: 5555` with **no IP line**, the EV3 still has the older `main.py`. Plug the EV3 into your laptop, press **`F5`** in VS Code (**EV3DEV DEVICE BROWSER**) to upload the latest [ev3/main.py](./ev3/main.py), or enable **Wireless and Networks → Tethering → Gadget** (or **All Network Connections → Wired → Connect**) on the EV3 Brick menu.
+  - Verify the USB link from the Raspberry Pi terminal:
+    ```bash
+    ip addr show dev usb0
+    ping -6 -c 2 ff02::1%usb0 ; ip neigh show dev usb0
     ```
 - **Boat drives backward when pushing joystick forward:**
   - Open [ev3/main.py](./ev3/main.py) line 25 and change `MOTOR_DIRECTION = Direction.CLOCKWISE` to `Direction.COUNTERCLOCKWISE` (or swap the motor cables if left/right are swapped).

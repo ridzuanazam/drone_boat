@@ -31,12 +31,13 @@ Wireless FPV boat controller hosted on a **Raspberry Pi 5** with a **Raspberry P
 5. Make sure your two Large Motors are plugged into **Port A** (Right) and **Port B** (Left).
 6. On the EV3 Brick screen:
    - Go to **File Browser** → open **`drone_boat/ev3/`** (or **`ev3_project/`**) → select **`main.py`** and press the **Center button**.
-   - The EV3 will **beep once** and display:
+   - The EV3 will **beep once**, auto-configure its USB IPv4 address (`169.254.201.2`), and display:
      ```text
      Boat EV3 Ready
-     169.254.x.x
+     169.254.201.2
      Port: 5555
      ```
+   - *(Tip: Whenever you update `ev3/main.py` in Git, remember to re-upload `ev3/main.py` to the EV3 Brick via VS Code `F5`, not just `git pull` on the Raspberry Pi.)*
 
 ---
 
@@ -85,8 +86,14 @@ Always run `app.py` with the Raspberry Pi's **system Python** (`/usr/bin/python3
 
 ```bash
 cd ~/drone_boat/pi
+pkill -f "python3 app.py" 2>/dev/null || true
 /usr/bin/python3 app.py
 ```
+- The terminal will print:
+  ```text
+  Drone Boat Cockpit listening on http://10.42.0.1:5000
+  Connected to EV3 at 169.254.201.2:5555
+  ```
 - Within 1–2 seconds, the EV3 screen will print **`Pi Connected`**.
 
 ---
