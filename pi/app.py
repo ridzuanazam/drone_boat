@@ -1,12 +1,15 @@
 """Web server for controlling the Drone Boat and streaming Raspberry Pi AI Camera."""
 
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import mimetypes
 import os
 import re
 import socket
 from urllib.parse import parse_qs, unquote, urlsplit
+import zipfile
 
 import config
 from camera_manager import CameraManager
@@ -24,6 +27,7 @@ EXTRA_MIME = {
     ".png": "image/png",
     ".mp4": "video/mp4",
     ".mjpg": "video/x-motion-jpeg",
+    ".zip": "application/zip",
 }
 
 
@@ -196,6 +200,46 @@ class BoatRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
 
+    def _serve_batch_zip(self, requested_items):
+        """Build and stream a ZIP archive containing the requested media items."""
+        resolved_files = []
+        seen = set()
+        for entry in requested_items:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind", "")
+            filename = entry.get("filename", "")
+            key = (kind, filename)
+            if key in seen:
+                continue
+            full_path = self.server.camera.resolve_media_file(kind, filename)
+            if full_path is not None:
+                seen.add(key)
+                resolved_files.append((filename, full_path))
+
+        if not resolved_files:
+            self._send_json(404, {"error": "no_valid_media"})
+            return
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
+            for arcname, full_path in resolved_files:
+                zf.write(full_path, arcname=arcname)
+        zip_bytes = buf.getvalue()
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_name = "drone_boat_media_{0}.zip".format(stamp)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(zip_bytes)))
+        self.send_header(
+            "Content-Disposition",
+            'attachment; filename="{0}"'.format(zip_name),
+        )
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(zip_bytes)
+
     def do_GET(self):
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
@@ -316,6 +360,38 @@ class BoatRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "item": item})
                 return
 
+            if path == "/api/media/batch-zip":
+                body = self._read_json_body()
+                if body is None:
+                    self._send_json(400, {"error": "invalid_json"})
+                    return
+                items = body.get("items")
+                if not isinstance(items, list) or not items:
+                    items = self.server.camera.list_media()
+                self._serve_batch_zip(items)
+                return
+
+            if path == "/api/media/batch-delete":
+                body = self._read_json_body()
+                if body is None:
+                    self._send_json(400, {"error": "invalid_json"})
+                    return
+                items = body.get("items", [])
+                if not isinstance(items, list):
+                    self._send_json(400, {"error": "invalid_items"})
+                    return
+                deleted = 0
+                for entry in items:
+                    if not isinstance(entry, dict):
+                        continue
+                    ok, _ = self.server.camera.delete_media(
+                        entry.get("kind", ""), entry.get("filename", "")
+                    )
+                    if ok:
+                        deleted += 1
+                self._send_json(200, {"ok": True, "deleted": deleted})
+                return
+
             self._send_json(404, {"error": "not_found"})
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -360,7 +436,6 @@ def create_server(
             discovery_port=config.EV3_DISCOVERY_PORT,
             max_speed=config.MAX_SPEED,
             command_timeout_s=config.COMMAND_TIMEOUT_S,
-            mock=config.MOCK_MODE,
         )
     return BoatHTTPServer((host, port), BoatRequestHandler, camera, ev3, static_dir)
 
@@ -386,7 +461,6 @@ def main():
         discovery_port=config.EV3_DISCOVERY_PORT,
         max_speed=config.MAX_SPEED,
         command_timeout_s=config.COMMAND_TIMEOUT_S,
-        mock=config.MOCK_MODE,
     )
     camera.start()
     ev3.start()

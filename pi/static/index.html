@@ -91,7 +91,19 @@
           <button class="tab-btn" data-filter="photos" type="button">Photos</button>
           <button class="tab-btn" data-filter="videos" type="button">Videos</button>
         </div>
-        <button class="close-btn" id="btn-close-gallery" type="button" aria-label="Close gallery">Done</button>
+        <div class="drawer-actions">
+          <button class="close-btn" id="btn-toggle-select" type="button">Select</button>
+          <button class="close-btn" id="btn-select-all" type="button">Select All</button>
+          <button class="close-btn" id="btn-close-gallery" type="button" aria-label="Close gallery">Done</button>
+        </div>
+      </div>
+      <div class="batch-bar hidden" id="batch-bar">
+        <span class="batch-count" id="batch-count">0 selected</span>
+        <div class="batch-btns">
+          <button class="batch-btn primary" id="btn-batch-share" type="button">Save to iPhone</button>
+          <button class="batch-btn secondary" id="btn-batch-zip" type="button">Download ZIP</button>
+          <button class="batch-btn danger" id="btn-batch-delete" type="button">Delete</button>
+        </div>
       </div>
       <div class="gallery-grid" id="gallery-grid"></div>
     </aside>

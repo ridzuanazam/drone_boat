@@ -30,8 +30,6 @@ AI_MODEL_PATH = os.environ.get(
 AI_THRESHOLD = float(os.environ.get("AI_THRESHOLD", "0.5"))
 AI_ENABLED_DEFAULT = os.environ.get("AI_ENABLED", "1") == "1"
 
-MOCK_MODE = os.environ.get("MOCK_MODE", "0") == "1"
-
 
 def ensure_media_dirs():
     """Create photo and video output folders if they do not exist."""

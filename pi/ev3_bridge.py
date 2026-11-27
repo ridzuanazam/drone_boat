@@ -1,13 +1,17 @@
 """EV3 wired-USB TCP bridge with differential joystick mixing and failsafe watchdog."""
 
 import math
+import os
+import re
 import select
 import socket
+import subprocess
 import threading
 import time
 
 DISCOVERY_REQUEST = b"EV3_BOAT_DISCOVER"
 DISCOVERY_REPLY_PREFIX = b"EV3_BOAT_HERE:"
+IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
 
 def mix_joystick(x, y, max_speed=900, deadzone=0.08):
@@ -26,17 +30,65 @@ def mix_joystick(x, y, max_speed=900, deadzone=0.08):
 
 
 def _get_local_ipv4s():
-    """Return deduplicated local non-loopback IPv4 addresses."""
+    """Return deduplicated local non-loopback IPv4 addresses across all interfaces."""
     ips = []
+
+    # 1. Linux /proc/net/fib_trie (discovers USB gadget / link-local 169.254.x.x interfaces on Pi)
+    if os.path.isfile("/proc/net/fib_trie"):
+        candidate_ip = None
+        try:
+            with open("/proc/net/fib_trie", "r") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if line.startswith("|-- "):
+                        parts = line.split()
+                        token = parts[1] if len(parts) > 1 else ""
+                        candidate_ip = token if IPV4_RE.fullmatch(token) else None
+                        if (
+                            candidate_ip
+                            and "/32 host LOCAL" in line
+                            and not candidate_ip.startswith("127.")
+                            and candidate_ip not in ips
+                        ):
+                            ips.append(candidate_ip)
+                            candidate_ip = None
+                    elif line.startswith("+-- "):
+                        candidate_ip = None
+                    elif "/32 host LOCAL" in line and candidate_ip:
+                        if not candidate_ip.startswith("127.") and candidate_ip not in ips:
+                            ips.append(candidate_ip)
+                        candidate_ip = None
+        except OSError:
+            pass
+
+    # 2. Hostname resolution fallback (Windows / macOS / Linux)
     try:
         infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        for info in infos:
+            ip = info[4][0]
+            if not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
     except OSError:
-        return ips
-    for info in infos:
-        ip = info[4][0]
-        if not ip.startswith("127.") and ip not in ips:
-            ips.append(ip)
+        pass
+
     return ips
+
+
+def _get_arp_neighbor_ips():
+    """Return candidate neighbor IPv4 addresses (including 169.254.x.x USB EV3 links)."""
+    neighbors = []
+    if os.path.isfile("/proc/net/arp"):
+        try:
+            with open("/proc/net/arp", "r") as handle:
+                for raw_line in handle.readlines()[1:]:
+                    parts = raw_line.split()
+                    if len(parts) >= 4 and IPV4_RE.fullmatch(parts[0]):
+                        ip = parts[0]
+                        if ip not in neighbors and not ip.startswith("127."):
+                            neighbors.append(ip)
+        except OSError:
+            pass
+    return neighbors
 
 
 def _subnet_broadcast(local_ip):
@@ -71,9 +123,12 @@ def discover_ev3_udp(discovery_port=5556, timeout_s=0.6, target_hosts=None):
             fallback.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             fallback.bind(("", 0))
             sockets.append(fallback)
-            targets = ["255.255.255.255"]
+            targets = ["255.255.255.255", "169.254.255.255", "10.42.0.255"]
             if target_hosts:
                 targets.extend(target_hosts)
+            for neighbor_ip in _get_arp_neighbor_ips():
+                if neighbor_ip not in targets:
+                    targets.append(neighbor_ip)
             for target in targets:
                 try:
                     fallback.sendto(DISCOVERY_REQUEST, (target, discovery_port))
@@ -123,7 +178,6 @@ class EV3Bridge:
         discovery_port=5556,
         max_speed=900,
         command_timeout_s=1.2,
-        mock=False,
         discovery_hosts=None,
     ):
         self.host = host
@@ -131,17 +185,16 @@ class EV3Bridge:
         self.discovery_port = discovery_port
         self.max_speed = max_speed
         self.command_timeout_s = command_timeout_s
-        self.mock = mock
         self._discovery_hosts = discovery_hosts
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._sock = None
-        self._connected = bool(mock)
-        self._active_host = "mock" if mock else host
+        self._connected = False
+        self._active_host = host
         self._active_port = port
         self._target_speeds = (0, 0)
-        self._sent_speeds = (0, 0) if mock else None
+        self._sent_speeds = None
         self._last_input_ts = time.monotonic()
         self._last_hb_ts = time.monotonic()
         self._worker_thread = None
@@ -208,9 +261,7 @@ class EV3Bridge:
         with self._lock:
             self._target_speeds = (left, right)
             self._last_input_ts = time.monotonic()
-            if self.mock:
-                self._sent_speeds = (left, right)
-            elif self._sock is not None and (left, right) != self._sent_speeds:
+            if self._sock is not None and (left, right) != self._sent_speeds:
                 if self._send_line_locked(self._format_speed_line(left, right)):
                     self._sent_speeds = (left, right)
                     self._last_hb_ts = time.monotonic()
@@ -221,9 +272,7 @@ class EV3Bridge:
         with self._lock:
             self._target_speeds = (0, 0)
             self._last_input_ts = time.monotonic()
-            if self.mock:
-                self._sent_speeds = (0, 0)
-            elif self._sock is not None:
+            if self._sock is not None:
                 if self._send_line_locked("S\n"):
                     self._sent_speeds = (0, 0)
                     self._last_hb_ts = time.monotonic()
@@ -244,31 +293,52 @@ class EV3Bridge:
                 "left_speed": left,
                 "right_speed": right,
                 "max_speed": self.max_speed,
-                "mock": self.mock,
             }
 
     def _try_open_tcp(self, host, port):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.0)
         try:
-            sock.connect((host, port))
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.settimeout(0.5)
-            return sock
+            infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
         except OSError:
+            infos = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (host, port))]
+
+        for family, socktype, proto, _canon, sockaddr in infos:
+            sock = None
             try:
-                sock.close()
+                sock = socket.socket(family, socktype, proto)
+                sock.settimeout(1.0)
+                sock.connect(sockaddr)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.settimeout(0.5)
+                return sock
             except OSError:
-                pass
-            return None
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+        return None
 
     def _connect_once(self):
-        sock = self._try_open_tcp(self.host, self.port)
+        candidate_hosts = [self.host]
+        for extra in ("ev3dev.local", "ev3dev"):
+            if extra not in candidate_hosts:
+                candidate_hosts.append(extra)
+        for neighbor_ip in _get_arp_neighbor_ips():
+            if neighbor_ip.startswith("169.254.") and neighbor_ip not in candidate_hosts:
+                candidate_hosts.append(neighbor_ip)
+
+        sock = None
         used_host, used_port = self.host, self.port
+        for candidate in candidate_hosts:
+            sock = self._try_open_tcp(candidate, self.port)
+            if sock is not None:
+                used_host = candidate
+                break
+
         if sock is None:
             found = discover_ev3_udp(
                 discovery_port=self.discovery_port,
-                timeout_s=0.5,
+                timeout_s=0.6,
                 target_hosts=self._discovery_hosts,
             )
             if found is not None:
@@ -291,17 +361,6 @@ class EV3Bridge:
     def _worker(self):
         while not self._stop_event.is_set():
             now = time.monotonic()
-            if self.mock:
-                with self._lock:
-                    if (
-                        self._target_speeds != (0, 0)
-                        and now - self._last_input_ts > self.command_timeout_s
-                    ):
-                        self._target_speeds = (0, 0)
-                        self._sent_speeds = (0, 0)
-                self._stop_event.wait(0.05)
-                continue
-
             with self._lock:
                 sock_missing = self._sock is None
 

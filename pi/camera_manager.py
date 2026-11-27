@@ -1,7 +1,6 @@
-"""Camera manager for Raspberry Pi 5 AI Camera (IMX500) + Mock FPV fallback."""
+"""Camera manager for Raspberry Pi 5 AI Camera (IMX500)."""
 
 import io
-import math
 import os
 import re
 import shutil
@@ -16,15 +15,9 @@ except ImportError:
     cv2 = None
 
 try:
-    import numpy as np
-except ImportError:
-    np = None
-
-try:
-    from PIL import Image, ImageDraw
+    from PIL import Image
 except ImportError:
     Image = None
-    ImageDraw = None
 
 import config
 
@@ -148,7 +141,6 @@ class CameraManager:
         ai_model_path=config.AI_MODEL_PATH,
         ai_threshold=config.AI_THRESHOLD,
         ai_enabled=config.AI_ENABLED_DEFAULT,
-        mock=config.MOCK_MODE,
         photos_dir=config.PHOTOS_DIR,
         videos_dir=config.VIDEOS_DIR,
     ):
@@ -172,9 +164,10 @@ class CameraManager:
         self._picam2 = None
         self._imx500 = None
         self._intrinsics = None
-        self._mock = bool(mock)
+        self._camera_ready = False
+        self._camera_error = None
         self._ai_enabled = bool(ai_enabled)
-        self._ai_available = bool(mock)
+        self._ai_available = False
         self._detections = []
         self._last_detections = []
         self._last_det_ts = 0.0
@@ -187,12 +180,11 @@ class CameraManager:
         self._recording_started_at = None
 
     def start(self):
-        """Initialize camera hardware (or mock generator) and start capture loop."""
+        """Initialize camera hardware and start capture loop."""
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
-        if not self._mock:
-            self._init_real_camera()
+        self._init_real_camera()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
@@ -215,9 +207,10 @@ class CameraManager:
     def _init_real_camera(self):
         try:
             from picamera2 import Picamera2
-        except ImportError:
-            self._mock = True
-            self._ai_available = True
+        except ImportError as exc:
+            self._camera_ready = False
+            self._camera_error = "picamera2 not installed ({0}). Run with /usr/bin/python3 app.py".format(exc)
+            print("ERROR:", self._camera_error)
             return
 
         try:
@@ -241,7 +234,12 @@ class CameraManager:
             )
             self._picam2.configure(cam_cfg)
             self._picam2.start()
-        except Exception:
+            self._camera_ready = True
+            self._camera_error = None
+        except Exception as exc:
+            self._camera_ready = False
+            self._camera_error = "Camera hardware initialization failed: {0}".format(exc)
+            print("ERROR:", self._camera_error)
             if self._picam2 is not None:
                 try:
                     self._picam2.close()
@@ -249,8 +247,7 @@ class CameraManager:
                     pass
                 self._picam2 = None
             self._imx500 = None
-            self._mock = True
-            self._ai_available = True
+            self._ai_available = False
 
     def set_ai_enabled(self, enabled):
         """Enable or disable live AI detection bounding-box overlay."""
@@ -265,7 +262,8 @@ class CameraManager:
             if self._recorder is not None and self._recording_started_at is not None:
                 rec_duration = max(0.0, time.monotonic() - self._recording_started_at)
             return {
-                "mock": self._mock,
+                "ready": self._camera_ready,
+                "error": self._camera_error,
                 "ai_enabled": self._ai_enabled,
                 "ai_available": self._ai_available,
                 "detection_count": len(self._detections) if self._ai_enabled else 0,
@@ -281,10 +279,13 @@ class CameraManager:
         interval = 1.0 / max(1, self.fps)
         while not self._stop_event.is_set():
             started = time.monotonic()
-            if self._mock:
-                frame_bgr, jpeg_bytes, detections = self._render_mock_frame(started)
-            else:
-                frame_bgr, jpeg_bytes, detections = self._capture_real_frame()
+            if not self._camera_ready or self._picam2 is None:
+                self._init_real_camera()
+                if not self._camera_ready:
+                    self._stop_event.wait(2.0)
+                    continue
+
+            frame_bgr, jpeg_bytes, detections = self._capture_real_frame()
 
             if jpeg_bytes is not None:
                 with self._frame_cond:
@@ -406,88 +407,6 @@ class CameraManager:
                 2,
                 cv2.LINE_AA,
             )
-
-    def _render_mock_frame(self, now):
-        w, h = self.width, self.height
-        horizon = int(h * 0.44)
-        with self._lock:
-            ai_on = self._ai_enabled
-
-        detections = []
-        if ai_on:
-            bx = int(w * (0.26 + 0.16 * math.sin(now * 0.7)))
-            by = int(h * 0.48)
-            detections.append(
-                {"label": "buoy", "score": 0.94, "box": [bx, by, 92, 118]}
-            )
-            bx2 = int(w * (0.62 - 0.12 * math.cos(now * 0.5)))
-            by2 = int(h * 0.42)
-            detections.append(
-                {"label": "boat", "score": 0.88, "box": [bx2, by2, 148, 84]}
-            )
-
-        if np is not None:
-            frame = np.zeros((h, w, 3), dtype=np.uint8)
-            frame[:horizon, :] = (38, 22, 14)   # deep twilight sky (BGR)
-            frame[horizon:, :] = (56, 36, 12)   # marine water (BGR)
-        else:
-            frame = None
-
-        if cv2 is not None and frame is not None:
-            cv2.line(frame, (0, horizon), (w, horizon), (140, 115, 70), 2)
-            for idx in range(6):
-                ry = horizon + 25 + idx * 42
-                shift = int(28 * math.sin(now * 2.0 + idx))
-                cv2.line(
-                    frame,
-                    (60 + shift, ry),
-                    (w - 60 + shift, ry),
-                    (92, 68, 28),
-                    1,
-                )
-            cx, cy = w // 2, h // 2
-            cv2.circle(frame, (cx, cy), 18, (180, 220, 255), 1)
-            cv2.line(frame, (cx - 28, cy), (cx + 28, cy), (180, 220, 255), 1)
-            cv2.line(frame, (cx, cy - 28), (cx, cy + 28), (180, 220, 255), 1)
-            stamp = datetime.now().strftime("SIM CAM  %H:%M:%S")
-            cv2.putText(
-                frame,
-                stamp,
-                (18, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (210, 230, 250),
-                2,
-                cv2.LINE_AA,
-            )
-            if ai_on:
-                self._draw_detections_cv2(frame, detections)
-            return (frame, self._encode_bgr_to_jpeg(frame), detections)
-
-        if Image is not None:
-            img = Image.new("RGB", (w, h), (14, 22, 38))
-            draw = ImageDraw.Draw(img)
-            draw.rectangle([0, 0, w, horizon], fill=(14, 22, 38))
-            draw.rectangle([0, horizon, w, h], fill=(12, 36, 56))
-            draw.line([(0, horizon), (w, horizon)], fill=(70, 115, 140), width=2)
-            for idx in range(6):
-                ry = horizon + 25 + idx * 42
-                shift = int(28 * math.sin(now * 2.0 + idx))
-                draw.line([(60 + shift, ry), (w - 60 + shift, ry)], fill=(28, 68, 92))
-            cx, cy = w // 2, h // 2
-            draw.ellipse([cx - 18, cy - 18, cx + 18, cy + 18], outline=(200, 230, 255))
-            draw.text((18, 18), datetime.now().strftime("SIM CAM %H:%M:%S"), fill=(220, 235, 250))
-            if ai_on:
-                for det in detections:
-                    x, y, bw, bh = det["box"]
-                    draw.rectangle([x, y, x + bw, y + bh], outline=(40, 210, 230), width=2)
-                    draw.text((x + 4, max(4, y - 14)), "{0} {1:.0%}".format(det["label"], det["score"]), fill=(40, 210, 230))
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=self.jpeg_quality)
-            frame_bgr = np.asarray(img)[:, :, ::-1].copy() if np is not None else None
-            return (frame_bgr, buf.getvalue(), detections)
-
-        return (None, None, [])
 
     def frame_generator(self):
         """Yield multipart MJPEG chunks whenever new frames arrive."""

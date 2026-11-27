@@ -29,6 +29,13 @@
   const galleryDrawer = document.getElementById("gallery-drawer");
   const galleryGrid = document.getElementById("gallery-grid");
   const btnCloseGallery = document.getElementById("btn-close-gallery");
+  const btnToggleSelect = document.getElementById("btn-toggle-select");
+  const btnSelectAll = document.getElementById("btn-select-all");
+  const batchBar = document.getElementById("batch-bar");
+  const batchCount = document.getElementById("batch-count");
+  const btnBatchShare = document.getElementById("btn-batch-share");
+  const btnBatchZip = document.getElementById("btn-batch-zip");
+  const btnBatchDelete = document.getElementById("btn-batch-delete");
   const filterTabs = document.querySelectorAll(".tab-btn");
 
   const previewModal = document.getElementById("preview-modal");
@@ -51,6 +58,8 @@
   let currentFilter = "all";
   let allMediaItems = [];
   let previewItem = null;
+  let selectMode = false;
+  const selectedKeys = new Set();
   const heldKeys = [];
 
   const KEY_TO_VECTOR = {
@@ -333,6 +342,38 @@
   });
 
   // Gallery & Preview
+  function itemKey(item) {
+    return item.kind + "/" + item.filename;
+  }
+
+  function getFilteredItems() {
+    return allMediaItems.filter(
+      (item) => currentFilter === "all" || item.kind === currentFilter
+    );
+  }
+
+  function getSelectedItems() {
+    return allMediaItems.filter((item) => selectedKeys.has(itemKey(item)));
+  }
+
+  function updateBatchUI() {
+    const filtered = getFilteredItems();
+    const selected = getSelectedItems();
+    const allFilteredSelected =
+      filtered.length > 0 && filtered.every((item) => selectedKeys.has(itemKey(item)));
+
+    btnToggleSelect.classList.toggle("active", selectMode);
+    btnToggleSelect.textContent = selectMode ? "Cancel" : "Select";
+    btnSelectAll.textContent = allFilteredSelected ? "Clear All" : "Select All";
+    batchBar.classList.toggle("hidden", !selectMode && selected.length === 0);
+    batchCount.textContent = selected.length + " selected";
+
+    const hasSelection = selected.length > 0;
+    btnBatchShare.disabled = !hasSelection;
+    btnBatchZip.disabled = !hasSelection;
+    btnBatchDelete.disabled = !hasSelection;
+  }
+
   async function openGallery() {
     stopBoat();
     galleryDrawer.classList.remove("hidden");
@@ -341,6 +382,8 @@
   }
 
   function closeGallery() {
+    selectMode = false;
+    selectedKeys.clear();
     galleryDrawer.classList.add("hidden");
     galleryDrawer.setAttribute("aria-hidden", "true");
   }
@@ -349,6 +392,10 @@
     try {
       const data = await apiRequest("/api/media", "GET");
       allMediaItems = data.items || [];
+      const validKeys = new Set(allMediaItems.map(itemKey));
+      for (const k of Array.from(selectedKeys)) {
+        if (!validKeys.has(k)) selectedKeys.delete(k);
+      }
       mediaCount.textContent = String(allMediaItems.length);
       renderGallery();
     } catch (_err) {
@@ -357,17 +404,26 @@
   }
 
   function renderGallery() {
-    const filtered = allMediaItems.filter(
-      (item) => currentFilter === "all" || item.kind === currentFilter
-    );
+    const filtered = getFilteredItems();
+    updateBatchUI();
     if (filtered.length === 0) {
       galleryGrid.innerHTML = '<div class="gallery-empty">No saved photos or videos yet.</div>';
       return;
     }
     galleryGrid.innerHTML = "";
     for (const item of filtered) {
+      const key = itemKey(item);
+      const isSelected = selectedKeys.has(key);
+
       const card = document.createElement("div");
-      card.className = "media-card";
+      card.className = "media-card" + (isSelected ? " selected" : "");
+
+      if (selectMode || selectedKeys.size > 0) {
+        const check = document.createElement("div");
+        check.className = "select-check";
+        check.textContent = "✓";
+        card.appendChild(check);
+      }
 
       const thumb = document.createElement("div");
       thumb.className = "media-thumb";
@@ -397,8 +453,104 @@
 
       card.appendChild(thumb);
       card.appendChild(meta);
-      card.addEventListener("click", () => openPreview(item));
+      card.addEventListener("click", () => {
+        if (selectMode || selectedKeys.size > 0) {
+          if (selectedKeys.has(key)) selectedKeys.delete(key);
+          else selectedKeys.add(key);
+          selectMode = true;
+          renderGallery();
+        } else {
+          openPreview(item);
+        }
+      });
       galleryGrid.appendChild(card);
+    }
+  }
+
+  async function downloadBatchZip(items) {
+    if (!items.length) return;
+    showToast("Preparing ZIP (" + items.length + " files)...");
+    try {
+      const resp = await fetch("/api/media/batch-zip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: items.map((it) => ({ kind: it.kind, filename: it.filename })),
+        }),
+      });
+      if (!resp.ok) throw new Error("zip_failed");
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "drone_boat_media_" + Date.now() + ".zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      showToast("Downloaded ZIP (" + items.length + " files)");
+    } catch (_err) {
+      showToast("ZIP download failed");
+    }
+  }
+
+  async function saveSelectedToIphone() {
+    const items = getSelectedItems();
+    if (!items.length) return;
+
+    // On iPhone Safari, Web Share API with files opens the native iOS sheet ("Save X Images/Videos")
+    if (navigator.share && navigator.canShare) {
+      try {
+        showToast("Loading " + items.length + " file(s) for iPhone Save...");
+        const files = [];
+        for (const it of items) {
+          const resp = await fetch(it.url);
+          const blob = await resp.blob();
+          const mime =
+            blob.type || (it.kind === "photos" ? "image/jpeg" : "video/mp4");
+          files.push(new File([blob], it.filename, { type: mime }));
+        }
+        if (navigator.canShare({ files })) {
+          await navigator.share({
+            files,
+            title: "Drone Boat Media (" + files.length + ")",
+          });
+          showToast("Saved/Shared " + files.length + " file(s)");
+          return;
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+      }
+    }
+
+    // Fallback: if single item, direct download; if multiple, download all as one ZIP
+    if (items.length === 1) {
+      const a = document.createElement("a");
+      a.href = items[0].download_url;
+      a.download = items[0].filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } else {
+      await downloadBatchZip(items);
+    }
+  }
+
+  async function deleteSelectedItems() {
+    const items = getSelectedItems();
+    if (!items.length) return;
+    try {
+      const res = await apiRequest("/api/media/batch-delete", "POST", {
+        items: items.map((it) => ({ kind: it.kind, filename: it.filename })),
+      });
+      if (res.ok) {
+        selectedKeys.clear();
+        await loadGallery();
+        refreshStatus();
+        showToast("Deleted " + (res.deleted || items.length) + " item(s)");
+      }
+    } catch (_err) {
+      showToast("Batch delete failed");
     }
   }
 
@@ -443,6 +595,29 @@
   btnCloseGallery.addEventListener("click", closeGallery);
   btnClosePreview.addEventListener("click", closePreview);
   previewBackdrop.addEventListener("click", closePreview);
+
+  btnToggleSelect.addEventListener("click", () => {
+    selectMode = !selectMode;
+    if (!selectMode) selectedKeys.clear();
+    renderGallery();
+  });
+
+  btnSelectAll.addEventListener("click", () => {
+    const filtered = getFilteredItems();
+    if (!filtered.length) return;
+    selectMode = true;
+    const allSelected = filtered.every((item) => selectedKeys.has(itemKey(item)));
+    for (const item of filtered) {
+      const k = itemKey(item);
+      if (allSelected) selectedKeys.delete(k);
+      else selectedKeys.add(k);
+    }
+    renderGallery();
+  });
+
+  btnBatchShare.addEventListener("click", saveSelectedToIphone);
+  btnBatchZip.addEventListener("click", () => downloadBatchZip(getSelectedItems()));
+  btnBatchDelete.addEventListener("click", deleteSelectedItems);
 
   btnDeleteMedia.addEventListener("click", async () => {
     if (!previewItem) return;
@@ -491,9 +666,14 @@
 
       maxSpeed = ev3.max_speed || 900;
       ev3Dot.className = "dot " + (ev3.connected ? "ok" : "off");
-      ev3Text.textContent = ev3.mock ? "EV3 (SIM)" : ev3.connected ? "EV3" : "NO EV3";
+      ev3Text.textContent = ev3.connected ? "EV3" : "NO EV3";
       updateThrustBar(barLeft, ev3.left_speed || 0);
       updateThrustBar(barRight, ev3.right_speed || 0);
+
+      if (cam.ready === false && cam.error) {
+        streamOffline.classList.remove("hidden");
+        streamOffline.innerHTML = "<span>" + cam.error + "</span>";
+      }
 
       isRecording = Boolean(cam.recording);
       btnRecord.classList.toggle("recording", isRecording);

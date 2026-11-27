@@ -151,19 +151,89 @@ def make_poller(sock):
     return wait_readable
 
 
-def stop_motors(left_motor, right_motor):
-    """Brake both drive motors immediately."""
-    left_motor.brake()
-    right_motor.brake()
+class MotorController:
+    """Hot-plugging wrapper for EV3 Large Motors (Port A=Right, Port B=Left)."""
+
+    def __init__(self, direction=MOTOR_DIRECTION):
+        self.direction = direction
+        self.right_motor = None
+        self.left_motor = None
+        self.refresh()
+
+    def refresh(self):
+        """Try to initialize any missing motor ports without crashing."""
+        if self.right_motor is None:
+            try:
+                self.right_motor = Motor(Port.A, positive_direction=self.direction)
+            except Exception:
+                self.right_motor = None
+        if self.left_motor is None:
+            try:
+                self.left_motor = Motor(Port.B, positive_direction=self.direction)
+            except Exception:
+                self.left_motor = None
+        return self.missing_ports()
+
+    def missing_ports(self):
+        missing = []
+        if self.right_motor is None:
+            missing.append("A")
+        if self.left_motor is None:
+            missing.append("B")
+        return missing
+
+    def stop(self):
+        """Brake both drive motors immediately."""
+        for attr in ("left_motor", "right_motor"):
+            motor = getattr(self, attr)
+            if motor is not None:
+                try:
+                    motor.brake()
+                except Exception:
+                    setattr(self, attr, None)
+
+    def apply_speeds(self, left, right):
+        """Set left (Port B) and right (Port A) motor speeds, hot-reconnecting if needed."""
+        if left == 0 and right == 0:
+            self.stop()
+            return
+        if self.left_motor is None or self.right_motor is None:
+            self.refresh()
+        if self.left_motor is not None:
+            try:
+                self.left_motor.run(left)
+            except Exception:
+                self.left_motor = None
+        if self.right_motor is not None:
+            try:
+                self.right_motor.run(right)
+            except Exception:
+                self.right_motor = None
 
 
-def apply_motor_speeds(left, right, left_motor, right_motor):
+def stop_motors(left_motor, right_motor=None):
+    """Brake both drive motors immediately (supports MotorController or raw pair)."""
+    if isinstance(left_motor, MotorController):
+        left_motor.stop()
+        return
+    if left_motor is not None:
+        left_motor.brake()
+    if right_motor is not None:
+        right_motor.brake()
+
+
+def apply_motor_speeds(left, right, left_motor, right_motor=None):
     """Set left (Port B) and right (Port A) motor speeds, or brake if both 0."""
+    if isinstance(left_motor, MotorController):
+        left_motor.apply_speeds(left, right)
+        return
     if left == 0 and right == 0:
         stop_motors(left_motor, right_motor)
     else:
-        left_motor.run(left)
-        right_motor.run(right)
+        if left_motor is not None:
+            left_motor.run(left)
+        if right_motor is not None:
+            right_motor.run(right)
 
 
 def handle_client(client, left_motor, right_motor, ev3=None):
@@ -279,9 +349,9 @@ def run_server(
 ):
     """Initialize EV3 motors (Port A=Right, Port B=Left) and run silent TCP server."""
     ev3 = EV3Brick()
-    right_motor = Motor(Port.A, positive_direction=MOTOR_DIRECTION)
-    left_motor = Motor(Port.B, positive_direction=MOTOR_DIRECTION)
-    stop_motors(left_motor, right_motor)
+    motors = MotorController(direction=MOTOR_DIRECTION)
+    missing_ports = motors.missing_ports()
+    motors.stop()
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -290,8 +360,31 @@ def run_server(
     server.listen(1)
     actual_port = port if port else server.getsockname()[1]
 
+    server6 = None
+    if hasattr(socket, "AF_INET6"):
+        try:
+            server6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            server6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "IPPROTO_IPV6") and hasattr(socket, "IPV6_V6ONLY"):
+                try:
+                    server6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                except OSError:
+                    pass
+            addr6 = socket.getaddrinfo("::", actual_port, socket.AF_INET6, socket.SOCK_STREAM)[0][-1]
+            server6.bind(addr6)
+            server6.listen(1)
+        except Exception:
+            if server6 is not None:
+                try:
+                    server6.close()
+                except Exception:
+                    pass
+                server6 = None
+
     discovery_sock = _bind_discovery_socket(host, discovery_port)
     listen_socks = [server]
+    if server6 is not None:
+        listen_socks.append(server6)
     if discovery_sock is not None:
         listen_socks.append(discovery_sock)
         if on_discovery_port is not None:
@@ -309,6 +402,8 @@ def run_server(
     ev3.speaker.beep()
     ev3.screen.clear()
     ev3.screen.print("Boat EV3 Ready")
+    if missing_ports:
+        ev3.screen.print("No Motor: " + ",".join(missing_ports))
     for ip_addr in local_ips[:2]:
         ev3.screen.print(ip_addr)
     ev3.screen.print("Port: {0}".format(actual_port))
@@ -326,21 +421,28 @@ def run_server(
                 continue
             if discovery_sock is not None and discovery_sock in ready_socks:
                 _handle_discovery_packet(discovery_sock, actual_port)
-            if server in ready_socks:
-                client, client_addr = server.accept()
-                print("Pi connected:", client_addr)
-                ev3.screen.print("Pi Connected")
-                should_exit = handle_client(client, left_motor, right_motor, ev3)
-                print("Pi disconnected:", client_addr)
-                if not should_exit:
-                    ev3.screen.print("Waiting...")
+            for srv_sock in (server, server6):
+                if srv_sock is not None and srv_sock in ready_socks:
+                    client, client_addr = srv_sock.accept()
+                    print("Pi connected:", client_addr)
+                    motors.refresh()
+                    ev3.screen.print("Pi Connected")
+                    should_exit = handle_client(client, motors, None, ev3)
+                    print("Pi disconnected:", client_addr)
+                    if not should_exit:
+                        ev3.screen.print("Waiting...")
     except KeyboardInterrupt:
         print("Server interrupted by user.")
     finally:
-        stop_motors(left_motor, right_motor)
+        motors.stop()
         if discovery_sock is not None:
             try:
                 discovery_sock.close()
+            except OSError:
+                pass
+        if server6 is not None:
+            try:
+                server6.close()
             except OSError:
                 pass
         try:

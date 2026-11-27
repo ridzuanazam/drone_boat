@@ -1,6 +1,6 @@
-# Drone Boat Technical Documentation
+# Drone Boat Technical & Setup Documentation
 
-Complete guide explaining **how the Drone Boat system works** under the hood and **how to set up and run it** on a **Raspberry Pi 5**, **Raspberry Pi AI Camera (IMX500)**, **LEGO MINDSTORMS EV3 Brick**, and **iPhone 14** (plus laptop keyboard control).
+Complete guide explaining **how the Drone Boat system works** and **exact step-by-step instructions and commands** to set up and run it on a **LEGO MINDSTORMS EV3 Brick**, **Raspberry Pi 5**, **Raspberry Pi AI Camera (IMX500)**, and **iPhone 14**.
 
 ---
 
@@ -8,15 +8,15 @@ Complete guide explaining **how the Drone Boat system works** under the hood and
 
 The Drone Boat uses a two-computer onboard architecture paired with a wireless mobile/desktop cockpit:
 
-- **iPhone 14 (Safari) / Laptop Browser**: Displays the live camera HUD and sends steering, photo, video, and AI commands over Wi-Fi.
-- **Raspberry Pi 5 (`pi/`)**: Hosts the HTTP web server (`pi/app.py`), captures video and on-chip AI inference from the **Raspberry Pi AI Camera**, saves photos/videos locally, and forwards motor commands to the EV3 over a wired USB cable.
-- **LEGO EV3 Brick (`ev3/main.py`)**: Runs Pybricks MicroPython on ev3dev Linux, drives the two Large Motors (**Port A = Right wheel/propeller**, **Port B = Left wheel/propeller**), stays silent (single startup beep only), and acts as an independent safety watchdog.
+- **iPhone 14 (Safari) / Laptop Browser**: Displays the live camera HUD, sends steering, photo, video, and AI commands over Wi-Fi, and supports multi-select bulk saving of photos and videos directly to the iPhone Photos app or as a single ZIP archive.
+- **Raspberry Pi 5 (`pi/`)**: Hosts the HTTP web server (`pi/app.py`), captures live video and on-chip AI inference from the **Raspberry Pi AI Camera (IMX500)**, records photos/videos locally, and forwards motor commands to the EV3 over a wired USB cable.
+- **LEGO EV3 Brick (`ev3/main.py`)**: Runs Pybricks MicroPython on ev3dev Linux, drives the two Large Motors (**Port A = Right motor**, **Port B = Left motor**) with automatic hot-plug detection, listens on both IPv4 and IPv6 TCP port `5555` + UDP discovery port `5556`, and acts as an independent safety watchdog.
 
 ```mermaid
 flowchart LR
-    Phone["iPhone 14 Safari / Laptop Browser\n(Touch Joystick + WASD + Camera HUD)"] <-->|"Wi-Fi (HTTP + MJPEG :5000)"| Pi5["Raspberry Pi 5\n(pi/app.py)"]
-    Pi5 <-->|"CSI Ribbon"| Cam["Raspberry Pi AI Camera\n(Sony IMX500 + Picamera2)"]
-    Pi5 <-->|"Wired USB Cable\n(TCP :5555 + UDP :5556)"| EV3["LEGO EV3 Brick\n(ev3/main.py)"]
+    Phone["iPhone 14 Safari / Laptop Browser\n(Touch Joystick + WASD + Bulk Media Save)"] <-->|"Wi-Fi Hotspot 10.42.0.1:5000\n(or LAN HTTP + MJPEG)"| Pi5["Raspberry Pi 5\n(/usr/bin/python3 pi/app.py)"]
+    Pi5 <-->|"CSI Ribbon Cable"| Cam["Raspberry Pi AI Camera\n(Sony IMX500 + Picamera2)"]
+    Pi5 <-->|"Mini-USB Cable\n(TCP :5555 + UDP :5556)"| EV3["LEGO EV3 Brick\n(ev3/main.py)"]
     EV3 -->|"Port B"| LeftMotor["Left Large Motor"]
     EV3 -->|"Port A"| RightMotor["Right Large Motor"]
 ```
@@ -25,192 +25,222 @@ flowchart LR
 
 ```text
 drone_boat/
-├── DOCUMENTATION.md          # This technical & run guide
+├── DOCUMENTATION.md          # Complete technical & step-by-step setup guide
 ├── README.md                 # Quick-start summary
+├── .gitattributes            # Enforces LF line endings on Python scripts for EV3 Linux
 ├── .gitignore
 ├── ev3/
-│   └── main.py               # Silent Pybricks MicroPython TCP + UDP discovery motor server
+│   └── main.py               # Pybricks MicroPython TCP (IPv4/IPv6) + UDP discovery motor server
 └── pi/
-    ├── requirements.txt      # Apt package list + optional desktop mock deps
+    ├── requirements.txt      # Raspberry Pi OS apt package reference
     ├── config.py             # Environment-configurable ports, speed, camera & AI settings
-    ├── ev3_bridge.py         # Differential tank mixer, UDP discovery, TCP client & watchdog
-    ├── camera_manager.py     # Picamera2 + IMX500 AI detection, MJPEG, photo/video & mock cam
-    ├── app.py                # Stdlib ThreadingHTTPServer, API endpoints & HTTP 206 media server
+    ├── ev3_bridge.py         # Differential tank mixer, USB/ARP/UDP discovery, TCP client & watchdog
+    ├── camera_manager.py     # Picamera2 + IMX500 AI detection, MJPEG stream, photo & MP4 video capture
+    ├── app.py                # Stdlib ThreadingHTTPServer, control API, HTTP 206 media & batch ZIP server
     ├── media/                # Created automatically at runtime (photos/*.jpg, videos/*.mp4)
     └── static/
-        ├── index.html        # Full-screen iPhone 14 cockpit layout
-        ├── style.css         # Glassmorphic HUD, safe-area insets & touch-action rules
-        └── controller.js     # Pointer joystick, WASD keyboard, gallery & status polling
+        ├── index.html        # Full-screen iPhone 14 cockpit layout & multi-select gallery drawer
+        ├── style.css         # Glassmorphic HUD, safe-area insets & batch selection styles
+        └── controller.js     # Pointer joystick, WASD keyboard, multi-select iOS share & ZIP download
 ```
 
 ---
 
-## 2. How It Works
+## 2. Detailed Step-by-Step Setup & Commands
 
-### 2.1 Differential Tank Steering (`ev3_bridge.py` & `ev3/main.py`)
+### Phase 1: Hardware Wiring
+1. **EV3 Motors**:
+   - Plug the **Right Large Motor** into **Port A** on the EV3 Brick.
+   - Plug the **Left Large Motor** into **Port B** on the EV3 Brick.
+   - *(Note: `ev3/main.py` supports motor hot-plugging—if a motor cable is plugged in after the program starts, it will automatically initialize on the next joystick move.)*
+2. **Raspberry Pi AI Camera**:
+   - With the Raspberry Pi 5 powered **off**, insert the AI Camera CSI ribbon cable into one of the Pi 5 `CAM/DISP` ports and lock the plastic clip.
+3. **USB Link (Pi 5 <-> EV3)**:
+   - After uploading `ev3/main.py` to the EV3 (Phase 2 below), connect the EV3 mini-USB port (top of brick) directly to any **USB-A port on the Raspberry Pi 5**.
+4. **Power Supplies**:
+   - Power the **Raspberry Pi 5** from a dedicated 5V/5A USB-C power bank.
+   - Power the **LEGO EV3 Brick** from its own EV3 battery pack or 6x AA batteries.
 
-Both the iPhone touch joystick and keyboard `W`/`A`/`S`/`D` keys produce normalized steering coordinates `(x, y)` where:
+---
+
+### Phase 2: Upload & Run `ev3/main.py` on the EV3 Brick
+
+1. Turn on your EV3 Brick and plug its mini-USB cable into your laptop.
+2. Verify your laptop can reach the EV3:
+   ```powershell
+   ping -n 2 ev3dev.local
+   ```
+3. Upload `ev3/main.py` to the EV3 using **either** VS Code or `scp`:
+
+   #### Method A: VS Code EV3DEV Device Browser
+   1. Look at the bottom of the left Explorer sidebar under **EV3DEV DEVICE BROWSER**.
+   2. Click **"Click here to connect to a device"** and choose **`ev3dev`**.
+   3. Once connected (green dot), press **`F5`** (or click the **Send workspace to device** upload icon).
+
+   #### Method B: Command Line (`scp` from Laptop or Pi)
+   ```powershell
+   ssh robot@ev3dev.local "mkdir -p /home/robot/drone_boat/ev3"
+   scp ev3/main.py robot@ev3dev.local:/home/robot/drone_boat/ev3/main.py
+   ```
+   *(When prompted for the password, type `maker` and press Enter.)*
+
+4. Ensure `main.py` has executable permissions on the EV3 (only needed once if uploaded via `scp`):
+   ```powershell
+   ssh robot@ev3dev.local "chmod +x /home/robot/drone_boat/ev3/main.py"
+   ```
+5. Unplug the USB cable from your laptop and **plug the EV3 into the Raspberry Pi 5 USB-A port**.
+6. On the EV3 Brick screen:
+   - Open **File Browser** → navigate into **`drone_boat/ev3`** (or **`ev3_project`**) → select **`main.py`** → press the **Center button**.
+   - The EV3 will **beep once** and display:
+     ```text
+     Boat EV3 Ready
+     169.254.x.x
+     Port: 5555
+     ```
+   - *(If a motor is not plugged into Port A or B yet, it will also display `No Motor: A,B` and automatically activate the motor as soon as you plug it in.)*
+
+---
+
+### Phase 3: Install Packages & Code on the Raspberry Pi 5
+
+1. Open a terminal on your **Raspberry Pi 5** and install the required system packages via `apt`:
+   ```bash
+   sudo apt update
+   sudo apt install -y python3-picamera2 python3-opencv imx500-all ffmpeg git
+   sudo reboot
+   ```
+2. After rebooting, confirm that Raspberry Pi OS detects the IMX500 AI Camera:
+   ```bash
+   rpicam-hello --list-cameras
+   ```
+   - You must see `imx500` listed.
+   - Test that system Python can import `picamera2`:
+     ```bash
+     /usr/bin/python3 -c "from picamera2 import Picamera2; print('Picamera2 OK')"
+     ```
+3. Clone or update the project on the Raspberry Pi 5:
+   ```bash
+   cd ~
+   git clone https://github.com/ridzuanazam/drone_boat.git
+   ```
+   *(If already cloned, update with `cd ~/drone_boat && git pull`.)*
+
+---
+
+### Phase 4: Configure Raspberry Pi 5 Wi-Fi Hotspot (For iPhone Control)
+
+When testing outdoors or anywhere without a local router, turn the Raspberry Pi 5 into a Wi-Fi Hotspot so your iPhone connects directly to the Pi:
+
+1. **Start the Hotspot on the Raspberry Pi 5:**
+   ```bash
+   sudo nmcli device wifi hotspot ifname wlan0 ssid DroneBoat password "droneboat"
+   ```
+   - On this hotspot, the Raspberry Pi 5's IP address is always **`10.42.0.1`**.
+2. **(Optional) Make the Hotspot auto-start every time the Pi boots:**
+   ```bash
+   sudo nmcli connection modify Hotspot connection.autoconnect yes
+   ```
+3. **How to switch back to normal home Wi-Fi later:**
+   ```bash
+   sudo nmcli connection down Hotspot
+   sudo nmcli device wifi connect "YOUR_HOME_WIFI_SSID" password "YOUR_HOME_WIFI_PASSWORD"
+   ```
+
+---
+
+### Phase 5: Start the Raspberry Pi Server & Connect iPhone 14
+
+1. Confirm the EV3 is plugged into the Raspberry Pi 5 via USB and showing **`Boat EV3 Ready / Port: 5555`**.
+2. On the Raspberry Pi 5 terminal, start the server using **system Python** (`/usr/bin/python3`):
+   ```bash
+   cd ~/drone_boat/pi
+   /usr/bin/python3 app.py
+   ```
+   > **Important:** Always use `/usr/bin/python3 app.py` (do **not** use an isolated `venv`, because `python3-picamera2` and `imx500` are installed in `/usr/lib/python3/dist-packages`).
+3. Within 1–2 seconds, check the EV3 screen—it will say **`Pi Connected`**.
+4. On your **iPhone 14**:
+   - Open **Settings → Wi-Fi** and connect to **`DroneBoat`** (password: `droneboat`).
+   - If iOS displays *"Wi-Fi Network 'DroneBoat' Does Not Appear to Be Connected to the Internet"*, tap **Keep Trying Wi-Fi** (or **Use Without Internet**).
+   - Open **Safari** and go to:
+     ```text
+     http://10.42.0.1:5000
+     ```
+     *(Or `http://<pi-lan-ip>:5000` if using home Wi-Fi instead of the hotspot.)*
+   - Tap **Share → Add to Home Screen** for a full-screen cockpit experience.
+
+---
+
+## 3. Saving & Downloading All Photos and Videos on iPhone
+
+1. While driving, tap the **White Shutter button** to take JPEG photos or the **Red REC button** to record H.264 `.mp4` videos.
+2. Tap the **`Gallery`** button at the top-right of your iPhone screen.
+3. To save or download everything at once:
+   - Tap **`Select All`** at the top-right of the gallery header (or tap **`Select`** and tap individual photos/videos to check them).
+   - Choose one of the batch actions in the blue bar:
+     - **`Save to iPhone`**: Opens the native iOS Share Sheet with all selected photos and videos pre-loaded. Tap **"Save X Images"** (or **"Save to Files"**) to save all of them directly into your iPhone **Photos** app in one tap!
+     - **`Download ZIP`**: Packages all selected photos and videos into a single `drone_boat_media_YYYYMMDD_HHMMSS.zip` archive and downloads it to your iPhone.
+     - **`Delete`**: Deletes all selected photos and videos from the Raspberry Pi SD card at once.
+
+---
+
+## 4. How the System Works Under the Hood
+
+### 4.1 Differential Tank Steering (`pi/ev3_bridge.py` & `ev3/main.py`)
+Both the iPhone touch joystick and keyboard `W`/`A`/`S`/`D` keys produce normalized steering coordinates `(x, y)`:
 - `x` in `[-1.0, +1.0]`: turn left (`-1`) to turn right (`+1`)
 - `y` in `[-1.0, +1.0]`: reverse (`-1`) to forward (`+1`)
 
-1. **`mix_joystick(x, y, max_speed=900, deadzone=0.08)`** in [ev3_bridge.py](file:///C:/dev/ws2/drone_boat/pi/ev3_bridge.py):
-   - Clamps `x` and `y` to `[-1.0, 1.0]`.
-   - If `hypot(x, y) < 0.08`, returns `(0, 0)` so resting jitter never nudges the motors.
-   - Computes differential thrust:
-     - `raw_left = y + x`
-     - `raw_right = y - x`
-   - Normalizes by `scale = max(1.0, abs(raw_left), abs(raw_right))` so diagonal steering stays proportional instead of clipping early, then scales to `MAX_SPEED` (`900` deg/s):
+1. **`mix_joystick(x, y, max_speed=900, deadzone=0.08)`**:
+   - Applies a `0.08` radial deadzone so resting finger jitter never moves the motors.
+   - Computes differential thrust (`raw_left = y + x`, `raw_right = y - x`), normalizes by `max(1.0, abs(raw_left), abs(raw_right))`, and scales to `MAX_SPEED` (`900` deg/s):
      - Full forward (`x=0, y=1`) -> `(+900, +900)`
      - Full reverse (`x=0, y=-1`) -> `(-900, -900)`
      - Spin right (`x=1, y=0`) -> `(+900, -900)`
      - Spin left (`x=-1, y=0`) -> `(-900, +900)`
-2. **`EV3Bridge.set_motors(left, right)`** clamps speeds to `[-MAX_SPEED, +MAX_SPEED]` and immediately sends `M <left> <right>\n` (or `S\n` when `(0, 0)`) over a `TCP_NODELAY` socket to the EV3.
-3. **`ev3/main.py`** maps **`Port.B`** to `left_motor` and **`Port.A`** to `right_motor`. It buffers incoming bytes by `\n`, applies only the latest movement/stop command in each TCP read chunk, and calls `.run(speed)` or `.brake()`.
-4. The EV3 brick stays **silent** during driving (only emitting one short `ev3.speaker.beep()` at startup).
+2. **`EV3Bridge.set_motors(left, right)`** sends `M <left> <right>\n` (or `S\n` when `(0, 0)`) over a low-latency `TCP_NODELAY` socket to the EV3.
+3. **`MotorController` in `ev3/main.py`** maps **`Port.B`** to `left_motor` and **`Port.A`** to `right_motor`, hot-reconnecting any motor port if a cable was plugged in after startup.
 
-### 2.2 Wired USB Link & Automatic EV3 Discovery
+### 4.2 Automatic USB Link Discovery (IPv4 + IPv6 + ARP + UDP)
+Plugging the EV3 into a Raspberry Pi 5 USB-A port creates a wired USB-Ethernet network interface (`169.254.x.x` link-local IPv4 and `fe80::...` link-local IPv6).
+- `ev3/main.py` binds both IPv4 (`0.0.0.0:5555`) and IPv6 (`[::]:5555`) TCP sockets plus UDP discovery port `5556`.
+- `pi/ev3_bridge.py` automatically checks `ev3dev.local` (IPv4 & IPv6), scans `/proc/net/arp` and `/proc/net/fib_trie` for `169.254.x.x` USB neighbors, and broadcasts `EV3_BOAT_DISCOVER` on UDP port `5556` across all interfaces so the Pi finds the EV3 even when `wlan0` is acting as a Wi-Fi Hotspot (`10.42.0.1`).
 
-Plugging the EV3 into a Raspberry Pi 5 USB-A port creates a wired USB-Ethernet network interface (`usb0` on Pi / `usb0` on ev3dev).
+### 4.3 Three-Layer Runaway Safety Failsafe
+1. **iPhone/Browser Layer (`controller.js`)**: Immediately sends `POST /api/stop` when you release the joystick, switch tabs, lock your iPhone, or open the gallery. Sends `POST /api/heartbeat` every `400 ms` while driving.
+2. **Raspberry Pi 5 Layer (`ev3_bridge.py`)**: Stops the motors (`S\n`) if no command or heartbeat arrives from the iPhone within `1.2 s` (`COMMAND_TIMEOUT_S`).
+3. **EV3 Layer (`ev3/main.py`)**: Immediately brakes both Port A and Port B motors if the Raspberry Pi stops sending heartbeats for `2.0 s` (`HEARTBEAT_TIMEOUT_MS`).
 
-- **Startup IP display**: `ev3/main.py` reads Linux `/proc/net/fib_trie` (`get_local_ips()`) and displays `"Boat EV3 Ready"`, up to two non-loopback IPv4 addresses, and `"Port: 5555"` on the EV3 LCD.
-- **Zero-config discovery**: `EV3Bridge` first tries `EV3_HOST:EV3_PORT` (default `ev3dev.local:5555`). If mDNS fails or the IP changed, `discover_ev3_udp()` broadcasts `EV3_BOAT_DISCOVER` on UDP port `5556` across all local interfaces (including `169.254.255.255` and `255.255.255.255`). The EV3 replies `EV3_BOAT_HERE:5555`, and the Pi connects automatically—retrying every `1.5 s` if the EV3 reboots or the USB cable is replugged.
+---
 
-### 2.3 Three-Layer Runaway Safety Failsafe
-
-A drone boat on water must stop immediately if signal is lost:
-
-```mermaid
-sequenceDiagram
-    participant UI as "iPhone / Keyboard"
-    participant Pi as "Raspberry Pi 5 (EV3Bridge)"
-    participant EV3 as "EV3 Brick (ev3/main.py)"
-    UI->>Pi: "POST /api/drive {x, y} + POST /api/heartbeat (400 ms)"
-    Pi->>EV3: "M left right\n + H\n (every 400 ms)"
-    Note over UI: "Finger lifted / blur / tab hidden -> POST /api/stop"
-    Note over Pi: "No input for 1.2 s (COMMAND_TIMEOUT_S) -> sends S\n"
-    Note over EV3: "No packet for 2.0 s (HEARTBEAT_TIMEOUT_MS) -> brakes Port A & B"
-```
-
-1. **Client layer ([controller.js](file:///C:/dev/ws2/drone_boat/pi/static/controller.js))**: Sends `POST /api/stop` on pointer release, `pointercancel`, window `blur`, `visibilitychange`, opening the gallery, or pressing `Space`/`Esc`. While holding the joystick off-center, it sends `POST /api/heartbeat` every `400 ms`.
-2. **Pi 5 layer ([ev3_bridge.py](file:///C:/dev/ws2/drone_boat/pi/ev3_bridge.py))**: Background watchdog thread checks every `50 ms`; if `time.monotonic() - last_input_ts > COMMAND_TIMEOUT_S` (`1.2 s`), it resets target speeds to `(0, 0)` and sends `S\n` to the EV3.
-3. **EV3 layer ([ev3/main.py](file:///C:/dev/ws2/drone_boat/ev3/main.py))**: Polls the TCP client with `HEARTBEAT_TIMEOUT_MS = 2000`. If Wi-Fi drops, the Pi crashes, or the USB cable is unplugged, the EV3 immediately runs `stop_motors()` (`brake()`) and waits cleanly for reconnection.
-
-### 2.4 AI Camera Pipeline, MJPEG Stream & Media Capture (`camera_manager.py`)
-
-[camera_manager.py](file:///C:/dev/ws2/drone_boat/pi/camera_manager.py) runs a background capture loop (`_capture_loop`) at `CAM_FPS` (`25 fps` at `960x540` by default):
-
-1. **On-chip AI inference (`IMX500`)**:
-   - Loads `AI_MODEL_PATH` (`/usr/share/imx500-models/imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk`) onto the IMX500 sensor if present.
-   - Captures synchronized frames and neural network metadata using `picam2.capture_request()`, parses `boxes, scores, classes` via `imx500.get_outputs(metadata, add_batch=True)`, maps bounding boxes with `imx500.convert_inference_coords(...)`, and filters by `AI_THRESHOLD` (`0.5`).
-   - When `AI` is toggled **ON**, draws bounding boxes and confidence labels directly onto the frame using OpenCV (`cv2`). Toggling **OFF** disables the overlay in real time without restarting the camera.
-2. **Live MJPEG stream**:
-   - Encodes each frame to JPEG (`JPEG_QUALITY = 80`) and notifies all open `/video_feed` viewers through a `threading.Condition`.
-3. **Non-interrupting Photo & Video capture**:
-   - **Photo (`capture_photo()`)**: Writes the latest JPEG bytes to `pi/media/photos/photo_YYYYMMDD_HHMMSS.jpg`.
-   - **Video (`start_recording()` / `stop_recording()`)**: Streams frames to an encoder in parallel while the live view continues uninterrupted:
-     - **Priority 1 (`ffmpeg`)**: Pipes `bgr24` frames to `ffmpeg` (`libx264`, `-preset ultrafast`, `-tune zerolatency`, `-pix_fmt yuv420p`, `-movflags +faststart`) producing **iPhone Safari-compatible `.mp4`** files in `pi/media/videos/`.
-     - **Priority 2 (`cv2.VideoWriter`)**: Falls back to `avc1` / `mp4v` `.mp4` if `ffmpeg` is not installed.
-     - **Priority 3 (`_MjpegRecorder`)**: Falls back to `.mjpg` if neither `ffmpeg` nor OpenCV is present.
-4. **Mock Mode (`MOCK_MODE=1`)**:
-   - Automatically used when `MOCK_MODE=1` is set (or if `picamera2` is unavailable). Renders an animated twilight ocean scene with moving `buoy` and `boat` AI detection overlays via OpenCV or Pillow.
-
-### 2.5 Web Server & HTTP API (`app.py`)
-
-[app.py](file:///C:/dev/ws2/drone_boat/pi/app.py) uses Python's standard-library `ThreadingHTTPServer` (no Flask or external pip packages required):
+## 5. HTTP API Reference (`pi/app.py`)
 
 | Method & Path | Purpose |
 | :--- | :--- |
 | `GET /` | Serves `pi/static/index.html` |
 | `GET /static/<file>` | Serves `style.css`, `controller.js` |
 | `GET /video_feed` | Multipart MJPEG live camera stream (`multipart/x-mixed-replace`) |
-| `GET /api/status` | Returns EV3 status, motor speeds, AI state, recording state/timer, and media count |
+| `GET /api/status` | Returns EV3 connection status, motor speeds, camera readiness/errors, AI state, recording timer, and media count |
 | `POST /api/drive` | Accepts `{"x": float, "y": float}` or `{"left": int, "right": int}` |
 | `POST /api/stop` | Immediately brakes both EV3 motors |
 | `POST /api/heartbeat` | Refreshes Pi-side `1.2 s` watchdog timer |
-| `POST /api/ai` | Sets `{"enabled": bool}` or toggles AI overlay if body is empty |
+| `POST /api/ai` | Sets `{"enabled": bool}` or toggles AI overlay |
 | `POST /api/photo` | Saves JPEG snapshot and returns item metadata (`201`) |
-| `POST /api/video/start` | Starts recording video alongside live stream |
+| `POST /api/video/start` | Starts recording H.264 `.mp4` video alongside live stream |
 | `POST /api/video/stop` | Finalizes and saves video, returning item metadata |
 | `GET /api/media` | Lists saved photos and videos newest-first |
-| `GET /media/<photos\|videos>/<name>` | Serves media with HTTP `Range` (`206 Partial Content` for Safari `<video>`); append `?download=1` for attachment download |
-| `DELETE /api/media/<photos\|videos>/<name>` | Deletes saved photo/video (`409` if actively recording) |
-
-### 2.6 Interactive Cockpit UI (`pi/static/`)
-
-- **Touch Joystick**: Uses Pointer Events (`setPointerCapture`) with `touch-action: none` so dragging steers smoothly without scrolling or zooming Safari.
-- **Keyboard Controls** (also visually mirrors onto the joystick knob):
-  - Hold **`W` / `S` / `A` / `D`**: Forward / Reverse / Turn Left / Turn Right
-  - **`Space`**: Emergency stop
-  - **`P`**: Take photo (triggers shutter flash + clickable toast)
-  - **`V`**: Start / stop video recording
-  - **`I`**: Toggle AI object detection
-  - **`G`**: Open / close media gallery (`Esc` closes preview/gallery or stops boat)
+| `GET /media/<photos\|videos>/<name>` | Serves media with HTTP `Range` (`206 Partial Content`); append `?download=1` for attachment download |
+| `POST /api/media/batch-zip` | Streams a `.zip` archive of selected `{"items": [{"kind", "filename"}, ...]}` |
+| `POST /api/media/batch-delete` | Deletes multiple selected media items at once |
+| `DELETE /api/media/<photos\|videos>/<name>` | Deletes a single saved photo or video |
 
 ---
 
-## 3. How to Run It
+## 6. Auto-Start on Raspberry Pi 5 Boot (`systemd`)
 
-### Option A: Quick Demo on Your Windows Laptop (`MOCK_MODE=1`)
-
-Test the full web cockpit, joystick, keyboard controls, simulated AI camera, photo/video capture, and gallery locally without Raspberry Pi or EV3 hardware:
-
-```powershell
-cd C:\dev\ws2\drone_boat
-$env:MOCK_MODE = "1"
-C:\dev\ws2\.venv\Scripts\python.exe pi\app.py
-```
-
-1. Open **`http://localhost:5000`** on your laptop browser.
-2. To preview on your **iPhone 14** on the same Wi-Fi, open **`http://<your-laptop-ip>:5000`** in Safari (allow Python through Windows Firewall if prompted).
-
----
-
-### Option B: Full Boat Deployment (EV3 + Raspberry Pi 5 + iPhone 14)
-
-#### Step 1: Hardware Wiring & Power
-1. Connect **Right Large Motor** -> EV3 **Port A**, **Left Large Motor** -> EV3 **Port B**.
-2. Connect the **Raspberry Pi AI Camera** to a CSI camera port on the Raspberry Pi 5.
-3. Connect the **EV3 Brick** (mini-USB port on top) to any **USB-A port** on the Raspberry Pi 5.
-4. Use **separate power** inside a waterproof hull:
-   - Raspberry Pi 5: 5V/5A USB-C power bank or 5V BEC.
-   - EV3 Brick: EV3 rechargeable battery pack or 6x AA batteries.
-
-#### Step 2: Prepare & Start the EV3 Brick (`ev3/main.py`)
-1. Copy [ev3/main.py](file:///C:/dev/ws2/drone_boat/ev3/main.py) onto your EV3 (`/home/robot/drone_boat/main.py`) via VS Code (`ev3devBrowser` -> `Download and Run`) or `scp`.
-2. On the EV3 Brickman menu, verify USB networking is active (**Wireless and Networks -> All Network Connections -> Wired** / **Tethering**).
-3. Run `main.py` on the EV3. Wait for the single startup beep and `"Boat EV3 Ready"` on the EV3 LCD.
-   - *Direction check*: Bench-test first before putting the boat in water. If forward steering spins the motors backward, change `MOTOR_DIRECTION = Direction.CLOCKWISE` to `Direction.COUNTERCLOCKWISE` in [ev3/main.py](file:///C:/dev/ws2/drone_boat/ev3/main.py#L25).
-
-#### Step 3: Install Packages & Start the Raspberry Pi 5 (`pi/`)
-1. On Raspberry Pi OS (Bookworm or newer), install system packages via `apt` (no `pip install` required):
-   ```bash
-   sudo apt update
-   sudo apt install -y python3-picamera2 python3-opencv imx500-all ffmpeg
-   sudo reboot
-   ```
-2. Copy the `pi/` folder onto your Raspberry Pi 5 (for example `/home/pi/drone_boat/pi`).
-3. Start the server:
-   ```bash
-   cd ~/drone_boat/pi
-   python3 app.py
-   ```
-   The terminal prints the URL (for example `http://192.168.1.50:5000` or `http://10.42.0.1:5000`).
-
-#### Step 4: Outdoor Wi-Fi Hotspot + iPhone 14 Cockpit
-When piloting outdoors away from a router, turn the Raspberry Pi 5 into its own Wi-Fi access point:
+To make the Drone Boat server start automatically whenever the Raspberry Pi 5 powers on, create `/etc/systemd/system/drone-boat.service`:
 
 ```bash
-sudo nmcli device wifi hotspot ifname wlan0 ssid DroneBoat password "droneboat"
-```
-
-1. On **iPhone 14**, open **Settings -> Wi-Fi** and join **`DroneBoat`**.
-2. Open **Safari** and go to **`http://10.42.0.1:5000`**.
-3. Tap **Share -> Add to Home Screen** to launch it as a full-screen cockpit app without Safari address bars.
-
-#### Optional: Auto-Start on Raspberry Pi 5 Boot
-Create `/etc/systemd/system/drone-boat.service` on the Pi 5 (adjust `User` and paths if your username is not `pi`):
-
-```ini
+sudo tee /etc/systemd/system/drone-boat.service > /dev/null << 'EOF'
 [Unit]
 Description=Drone Boat Cockpit Server
 After=network-online.target
@@ -226,50 +256,35 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
-Enable and start it:
+*(If your Raspberry Pi username is not `pi`, replace `User=pi` and `/home/pi` with your username, e.g. `$USER`.)*
+
+Enable and start the service:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now drone-boat
 ```
 
----
-
-## 4. Configuration Reference (`pi/config.py`)
-
-All Raspberry Pi settings can be overridden via environment variables before running `python3 app.py`:
-
-| Environment Variable | Default | Description |
-| :--- | :--- | :--- |
-| `WEB_HOST` | `0.0.0.0` | HTTP bind interface |
-| `WEB_PORT` | `5000` | HTTP web cockpit port |
-| `EV3_HOST` | `ev3dev.local` | Primary EV3 hostname or IP (falls back to UDP discovery) |
-| `EV3_PORT` | `5555` | EV3 TCP motor control port |
-| `EV3_DISCOVERY_PORT` | `5556` | UDP broadcast discovery port |
-| `MAX_SPEED` | `900` | Maximum EV3 motor speed (`deg/s`) |
-| `COMMAND_TIMEOUT_S` | `1.2` | Pi-side watchdog stop timeout (`seconds`) |
-| `CAM_WIDTH` | `960` | Stream and video frame width (`px`) |
-| `CAM_HEIGHT` | `540` | Stream and video frame height (`px`) |
-| `CAM_FPS` | `25` | Target camera capture frame rate |
-| `JPEG_QUALITY` | `80` | MJPEG / photo JPEG quality (`1–100`) |
-| `AI_MODEL_PATH` | `/usr/share/imx500-models/imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk` | IMX500 `.rpk` model file |
-| `AI_THRESHOLD` | `0.5` | Minimum detection confidence (`0.0–1.0`) |
-| `AI_ENABLED` | `1` | Start with AI overlay enabled (`1` or `0`) |
-| `MOCK_MODE` | `0` | Simulate camera and EV3 without hardware (`1` or `0`) |
+Check logs at any time with:
+```bash
+journalctl -u drone-boat -f
+```
 
 ---
 
-## 5. Troubleshooting
+## 7. Troubleshooting
 
 - **Top-left status shows `NO EV3` (red dot):**
-  - Confirm [ev3/main.py](file:///C:/dev/ws2/drone_boat/ev3/main.py) is running on the EV3 (`Boat EV3 Ready` on screen) and the USB cable is plugged into the EV3's mini-USB port and Pi 5 USB-A port.
-  - Check the IP shown on the EV3 screen and start the server with `EV3_HOST=<ev3-ip> python3 app.py`.
-- **Boat moves backward or turns opposite to joystick:**
-  - Flip `MOTOR_DIRECTION` in [ev3/main.py](file:///C:/dev/ws2/drone_boat/ev3/main.py#L25) to `Direction.COUNTERCLOCKWISE`, or swap the motor plugs between **Port A** (right) and **Port B** (left).
-- **Camera runs in simulated mode on Raspberry Pi 5:**
-  - Verify `python3-picamera2` and `imx500-all` are installed (`sudo apt install -y python3-picamera2 python3-opencv imx500-all`), check the CSI ribbon orientation, and confirm `rpicam-hello` works.
-- **Recorded video won't play inline in iPhone Safari:**
-  - Ensure `ffmpeg` is installed on the Pi (`sudo apt install -y ffmpeg`). Without `ffmpeg`, OpenCV's `mp4v` fallback or `.mjpg` fallback may only download rather than play inline in iOS Safari.
-- **Motors stop briefly while driving slowly:**
-  - Make sure you don't have two browser tabs open against the same boat, and keep Wi-Fi within line-of-sight range so `/api/heartbeat` (`400 ms`) reaches the Pi before the `1.2 s` watchdog triggers.
+  - Make sure `ev3/main.py` is running on the EV3 (`Boat EV3 Ready` and `Port: 5555` visible on the EV3 screen) and the USB cable connects the EV3 to the Pi 5.
+  - If needed, read the IP address displayed on the EV3 LCD and pass it explicitly:
+    ```bash
+    EV3_HOST=169.254.x.x /usr/bin/python3 app.py
+    ```
+- **Boat drives backward when pushing joystick forward:**
+  - Open [ev3/main.py](./ev3/main.py) line 25 and change `MOTOR_DIRECTION = Direction.CLOCKWISE` to `Direction.COUNTERCLOCKWISE` (or swap the motor cables if left/right are swapped).
+- **Camera stream says `picamera2 not installed`:**
+  - You ran `python app.py` inside a virtual environment (`venv`). Deactivate the `venv` and run `/usr/bin/python3 app.py`.
+- **Camera stream says `Camera hardware initialization failed`:**
+  - Run `rpicam-hello --list-cameras` on the Pi 5. If no camera is found, power off the Pi 5, check that the AI Camera ribbon cable is firmly seated with the metal contacts facing the right way, and power back on.
