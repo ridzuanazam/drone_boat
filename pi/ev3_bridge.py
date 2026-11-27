@@ -133,12 +133,37 @@ def _ensure_linux_usb_network():
 
 
 def _get_ipv6_usb_neighbors():
-    """Discover link-local IPv6 neighbors (fe80::...%usb0) on USB Ethernet interfaces."""
+    """Discover link-local IPv6 neighbors (including derived EV3 gadget EUI-64) on USB interfaces."""
     results = []
-    if not os.path.isdir("/sys/class/net"):
+    sys_net = "/sys/class/net"
+    if not os.path.isdir(sys_net):
         return results
     for iface in _get_usb_net_interfaces():
-        # Ping all-nodes multicast on the USB interface to populate neighbor table
+        # 1. Derive the EV3's link-local IPv6 address directly from the host usb0 MAC address!
+        # On ev3dev, the host gadget MAC is 12:16:53:XX:YY:ZZ and the EV3 brick MAC is 02:16:53:XX:YY:ZZ,
+        # which always produces fe80::2016:53ff:feXX:YYZZ%usb0 (or fe80::16:53ff:feXX:YYZZ%usb0).
+        addr_file = os.path.join(sys_net, iface, "address")
+        if addr_file and os.path.isfile(addr_file):
+            try:
+                with open(addr_file, "r") as handle:
+                    mac = handle.read().strip().lower()
+                octets = mac.split(":")
+                if len(octets) == 6 and octets[1] == "16" and octets[2] == "53":
+                    b = [int(x, 16) for x in octets]
+                    for ev3_b0 in (0x22, 0x02, b[0] ^ 0x30, b[0] ^ 0x10):
+                        w1 = ((ev3_b0 ^ 0x02) << 8) | b[1]
+                        w2 = (b[2] << 8) | 0xFF
+                        w3_val = 0xFE00 | b[3]
+                        w4_val = (b[4] << 8) | b[5]
+                        derived = "fe80::{0:x}:{1:x}:{2:x}:{3:x}%{4}".format(
+                            w1, w2, w3_val, w4_val, iface
+                        )
+                        if derived not in results:
+                            results.append(derived)
+            except Exception:
+                pass
+
+        # 2. Ping all-nodes multicast on the USB interface to populate neighbor table
         try:
             subprocess.run(
                 ["ping", "-6", "-c", "1", "-W", "1", "ff02::1%" + iface],
