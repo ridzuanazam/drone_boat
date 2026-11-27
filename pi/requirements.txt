@@ -1,0 +1,9 @@
+# Zero pip packages are strictly required on Raspberry Pi 5 (uses Python stdlib HTTP server).
+#
+# On Raspberry Pi OS (Bookworm or later), install system camera, OpenCV, IMX500, and MP4 tools via apt:
+#   sudo apt update
+#   sudo apt install -y python3-picamera2 python3-opencv imx500-all ffmpeg
+#
+# Optional packages for desktop MOCK_MODE=1 testing (if not already installed):
+pillow>=10.0.0
+numpy>=1.26.0

@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Drone Boat">
+  <title>Drone Boat Cockpit</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="cockpit" id="cockpit">
+    <img id="video-feed" class="video-feed" src="/video_feed" alt="Live AI Camera Stream">
+    <div id="stream-offline" class="stream-offline hidden">
+      <span>Reconnecting camera stream...</span>
+    </div>
+    <div id="shutter-flash" class="shutter-flash"></div>
+
+    <!-- Top HUD Bar -->
+    <header class="top-bar">
+      <div class="pill status-pill" id="ev3-pill" title="EV3 Motor Link">
+        <span class="dot" id="ev3-dot"></span>
+        <span class="pill-text" id="ev3-text">EV3</span>
+        <div class="thrust-group">
+          <div class="thrust-item">
+            <span class="thrust-lbl">L</span>
+            <div class="thrust-track"><div class="thrust-fill" id="bar-left"></div></div>
+          </div>
+          <div class="thrust-item">
+            <span class="thrust-lbl">R</span>
+            <div class="thrust-track"><div class="thrust-fill" id="bar-right"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pill rec-pill hidden" id="rec-pill">
+        <span class="rec-dot"></span>
+        <span id="rec-timer">REC 00:00</span>
+      </div>
+
+      <div class="top-actions">
+        <button class="pill pill-btn active" id="btn-ai" type="button" aria-pressed="true">
+          <span class="ai-dot" id="ai-dot"></span>
+          <span>AI</span>
+          <span class="badge hidden" id="ai-count">0</span>
+        </button>
+        <button class="pill pill-btn" id="btn-gallery" type="button">
+          <span>Gallery</span>
+          <span class="badge" id="media-count">0</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Toast Notification -->
+    <button class="toast hidden" id="toast" type="button"></button>
+
+    <!-- Bottom Controls -->
+    <section class="controls-layer">
+      <div class="joystick-wrap">
+        <div class="joystick-base" id="joystick-base" role="application" aria-label="Boat steering joystick">
+          <div class="joy-ring"></div>
+          <div class="joy-axis joy-axis-h"></div>
+          <div class="joy-axis joy-axis-v"></div>
+          <div class="joystick-knob" id="joystick-knob"></div>
+        </div>
+        <div class="drive-readout" id="drive-readout">IDLE</div>
+      </div>
+
+      <div class="kbd-hint">WASD Drive · Space Stop · P Photo · V Rec · I AI</div>
+
+      <div class="action-dock">
+        <button class="shutter-btn" id="btn-photo" type="button" aria-label="Take photo" title="Take Photo (P)">
+          <span class="shutter-inner"></span>
+        </button>
+        <button class="rec-btn" id="btn-record" type="button" aria-label="Record video" title="Record Video (V)">
+          <span class="rec-inner"></span>
+        </button>
+        <button class="stop-btn" id="btn-stop" type="button" aria-label="Emergency stop" title="Stop (Space)">
+          STOP
+        </button>
+      </div>
+    </section>
+
+    <!-- Slide-up Media Gallery Drawer -->
+    <aside class="gallery-drawer hidden" id="gallery-drawer" aria-hidden="true">
+      <div class="drawer-header">
+        <h2>Saved Media</h2>
+        <div class="filter-tabs" role="tablist">
+          <button class="tab-btn active" data-filter="all" type="button">All</button>
+          <button class="tab-btn" data-filter="photos" type="button">Photos</button>
+          <button class="tab-btn" data-filter="videos" type="button">Videos</button>
+        </div>
+        <button class="close-btn" id="btn-close-gallery" type="button" aria-label="Close gallery">Done</button>
+      </div>
+      <div class="gallery-grid" id="gallery-grid"></div>
+    </aside>
+
+    <!-- Full-screen Media Preview Modal -->
+    <div class="preview-modal hidden" id="preview-modal" aria-hidden="true">
+      <div class="preview-backdrop" id="preview-backdrop"></div>
+      <div class="preview-card">
+        <div class="preview-header">
+          <span class="preview-title" id="preview-title"></span>
+          <button class="close-btn" id="btn-close-preview" type="button">Close</button>
+        </div>
+        <div class="preview-body" id="preview-body"></div>
+        <div class="preview-footer">
+          <a class="modal-btn primary" id="btn-download-media" href="#" download>Save</a>
+          <button class="modal-btn danger" id="btn-delete-media" type="button">Delete</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/controller.js"></script>
+</body>
+</html>
