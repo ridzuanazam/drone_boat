@@ -74,6 +74,97 @@ def _get_local_ipv4s():
     return ips
 
 
+def _get_usb_net_interfaces():
+    """Return Linux USB Ethernet interface names (e.g., usb0, enx...) used by EV3."""
+    ifaces = []
+    sys_net = "/sys/class/net"
+    if not os.path.isdir(sys_net):
+        return ifaces
+    try:
+        for name in os.listdir(sys_net):
+            if name in ("lo", "wlan0", "eth0"):
+                continue
+            dev_link = os.path.join(sys_net, name, "device")
+            real_dev = os.path.realpath(dev_link) if os.path.exists(dev_link) else ""
+            if (
+                name.startswith(("usb", "enx", "eth1"))
+                or "/usb" in real_dev
+            ):
+                ifaces.append(name)
+    except OSError:
+        pass
+    return ifaces
+
+
+def _ensure_linux_usb_network():
+    """Best-effort configure Raspberry Pi USB-Ethernet interface to link-local IPv4/IPv6."""
+    if not os.path.isdir("/sys/class/net"):
+        return
+    for iface in _get_usb_net_interfaces():
+        # Check if interface already has an IPv4 or IPv6 address
+        try:
+            out = subprocess.check_output(
+                ["ip", "-o", "addr", "show", "dev", iface],
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+            ).decode("utf-8", errors="ignore")
+            if "inet " in out and "169.254." in out:
+                continue
+        except Exception:
+            out = ""
+
+        # Try NetworkManager link-local ipv4.method=link-local first, then ip addr fallback
+        for cmd in (
+            ["sudo", "-n", "ip", "link", "set", iface, "up"],
+            ["nmcli", "connection", "modify", "Wired connection 1", "ipv4.method", "link-local"],
+            ["nmcli", "device", "modify", iface, "ipv4.method", "link-local"],
+            ["sudo", "-n", "nmcli", "device", "modify", iface, "ipv4.method", "link-local"],
+            ["sudo", "-n", "ip", "addr", "add", "169.254.117.1/16", "broadcast", "169.254.255.255", "dev", iface],
+        ):
+            try:
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+
+
+def _get_ipv6_usb_neighbors():
+    """Discover link-local IPv6 neighbors (fe80::...%usb0) on USB Ethernet interfaces."""
+    results = []
+    if not os.path.isdir("/sys/class/net"):
+        return results
+    for iface in _get_usb_net_interfaces():
+        # Ping all-nodes multicast on the USB interface to populate neighbor table
+        try:
+            subprocess.run(
+                ["ping", "-6", "-c", "1", "-W", "1", "ff02::1%" + iface],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+            )
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(
+                ["ip", "-6", "neigh", "show", "dev", iface],
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+            ).decode("utf-8", errors="ignore")
+            for line in out.splitlines():
+                parts = line.split()
+                if parts and parts[0].startswith("fe80:"):
+                    scoped = "{0}%{1}".format(parts[0], iface)
+                    if scoped not in results:
+                        results.append(scoped)
+        except Exception:
+            pass
+    return results
+
+
 def _get_arp_neighbor_ips():
     """Return candidate neighbor IPv4 addresses (including 169.254.x.x USB EV3 links)."""
     neighbors = []
@@ -319,13 +410,17 @@ class EV3Bridge:
         return None
 
     def _connect_once(self):
+        _ensure_linux_usb_network()
         candidate_hosts = [self.host]
         for extra in ("ev3dev.local", "ev3dev"):
             if extra not in candidate_hosts:
                 candidate_hosts.append(extra)
         for neighbor_ip in _get_arp_neighbor_ips():
-            if neighbor_ip.startswith("169.254.") and neighbor_ip not in candidate_hosts:
+            if neighbor_ip not in candidate_hosts:
                 candidate_hosts.append(neighbor_ip)
+        for v6_neighbor in _get_ipv6_usb_neighbors():
+            if v6_neighbor not in candidate_hosts:
+                candidate_hosts.append(v6_neighbor)
 
         sock = None
         used_host, used_port = self.host, self.port
@@ -347,6 +442,7 @@ class EV3Bridge:
         if sock is None:
             return False
 
+        print("Connected to EV3 at {0}:{1}".format(used_host, used_port))
         with self._lock:
             self._sock = sock
             self._connected = True
